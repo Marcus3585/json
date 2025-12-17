@@ -40,23 +40,68 @@
             background: #cbd5e1;
         }
 
-        /* 列印樣式 */
+        /* --- 強力列印樣式修正 --- */
         @media print {
-            @page { margin: 1cm; size: A4; }
-            body { background: white; -webkit-print-color-adjust: exact; }
-            aside, header, button, .no-print { display: none !important; }
+            @page { margin: 1.5cm; size: A4; }
+            
+            /* 重置所有容器的高度與捲動設定 */
+            html, body, #root {
+                height: auto !important;
+                min-height: 0 !important;
+                overflow: visible !important;
+                background: white !important;
+                -webkit-print-color-adjust: exact;
+            }
+
+            /* 隱藏介面元素 */
+            aside, header, button, .no-print, input, ::-webkit-scrollbar { 
+                display: none !important; 
+            }
+
+            /* 解除 Flexbox 限制，讓內容自然流動 */
+            div.flex, div.h-screen {
+                display: block !important;
+                height: auto !important;
+                overflow: visible !important;
+                position: static !important;
+            }
+
+            /* 針對主內容區域的特別修正 */
             #report-viewer { 
+                display: block !important;
                 overflow: visible !important; 
                 height: auto !important; 
+                width: 100% !important;
+                max-width: none !important;
                 padding: 0 !important; 
+                margin: 0 !important;
                 background: white !important;
                 position: static !important;
             }
+
+            /* 確保內容容器不被切割 */
             main > div { 
                 box-shadow: none !important; 
                 border: none !important; 
                 max-width: none !important;
                 width: 100% !important;
+                margin: 0 !important;
+                page-break-after: auto;
+            }
+
+            /* 避免文字在不該斷的地方斷開 */
+            p, h3, li {
+                page-break-inside: avoid;
+            }
+            
+            /* 強制字體顏色為黑色以利閱讀 */
+            * {
+                color: black !important;
+            }
+            /* 但保留分數與標籤的背景色辨識度 */
+            .bg-green-100, .bg-red-100, .bg-blue-100, .bg-yellow-100 {
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
             }
         }
     </style>
@@ -268,7 +313,7 @@
                 {lines.map((line, idx) => {
                     if (line.match(/^(#+\s|.*[甲乙丙丁戊己庚辛壬癸]部、|.*[A-Z] Part|Section|【.*】)/)) {
                     return (
-                        <h3 key={idx} className="text-xl font-bold text-slate-800 mt-8 mb-4 border-b border-slate-200 pb-2 flex items-center gap-3">
+                        <h3 key={idx} className="text-xl font-bold text-slate-800 mt-8 mb-4 border-b border-slate-200 pb-2 flex items-center gap-3 break-after-avoid">
                         <div className="w-1.5 h-6 bg-indigo-500 rounded-full"></div>
                         {line.replace(/^#+\s/, '').replace(/[【】]/g, '')}
                         </h3>
@@ -281,9 +326,9 @@
                         const cells = line.split('|').filter((c, i, arr) => i !== 0 && i !== arr.length - 1);
                         if (line.match(/\|[\s-]*:?[\s-]*\|/)) return null; 
                         return (
-                            <div key={idx} className="grid grid-flow-col auto-cols-fr gap-2 border-b border-slate-100 py-2 text-sm overflow-x-auto">
+                            <div key={idx} className="grid grid-flow-col auto-cols-fr gap-2 border-b border-slate-100 py-2 text-sm overflow-x-auto print:block print:overflow-visible">
                                 {cells.map((c, cIdx) => (
-                                    <span key={cIdx} className="px-2 truncate" title={c.trim()}>{c.trim()}</span>
+                                    <span key={cIdx} className="px-2 truncate print:inline-block print:mr-4" title={c.trim()}>{c.trim()}</span>
                                 ))}
                             </div>
                         )
