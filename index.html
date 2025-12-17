@@ -1,621 +1,710 @@
-import React, { useState, useMemo } from 'react';
-import { Upload, FileText, User, BarChart3, Printer, Search, ChevronRight, Award, AlertCircle, CheckCircle2, LayoutDashboard, Eye, ChevronDown } from 'lucide-react';
-
-// --- Types ---
-interface StudentReport {
-  [key: string]: any;
-}
-
-// --- Helper Functions ---
-
-const safeString = (val: any): string => {
-  if (typeof val === 'string') return val;
-  if (typeof val === 'number') return String(val);
-  if (val === null || val === undefined) return '';
-  if (typeof val === 'object') {
-      const textKeys = ['text', 'content', 'message', 'value', 'markdown', 'report', 'feedback'];
-      for (const k of textKeys) {
-        if (typeof val[k] === 'string') return val[k];
-      }
-      return JSON.stringify(val, null, 2);
-  }
-  return String(val);
-};
-
-const safeNumber = (val: any): number => {
-  if (typeof val === 'number') return val;
-  if (typeof val === 'string') {
-      const match = val.match(/(\d+(\.\d+)?)/);
-      if (match) return parseFloat(match[0]);
-  }
-  return 0;
-};
-
-// --- Smart Field Logic ---
-
-const getPotentialTextFields = (student: any): { key: string, value: string, score: number }[] => {
-    if (!student || typeof student !== 'object') return [];
-
-    const candidates: { key: string, value: string, score: number }[] = [];
-
-    Object.keys(student).forEach(key => {
-        const val = student[key];
-        if (!val) return;
-        
-        let strVal = typeof val === 'string' ? val : safeString(val);
-        
-        if (strVal.length < 20 && !key.toLowerCase().includes('feedback') && !key.toLowerCase().includes('report')) return;
-
-        let score = 0;
-
-        // Positive Signals
-        if (key.toLowerCase().includes('feedback')) score += 50;
-        if (key.toLowerCase().includes('report')) score += 40;
-        if (key.toLowerCase().includes('analysis')) score += 30;
-        if (key.toLowerCase().includes('評語')) score += 50;
-        if (key.toLowerCase().includes('報告')) score += 40;
-        
-        // Content Signals
-        if (strVal.includes('得分') || strVal.includes('Score:')) score += 20;
-        if (strVal.includes('評語') || strVal.includes('Feedback:')) score += 20;
-        if (strVal.includes('**')) score += 5;
-        if (strVal.match(/\d+\s*\/\s*\d+/)) score += 10; 
-        if (strVal.includes('【評分結果】')) score += 100;
-
-        // Negative Signals
-        if (key.toLowerCase().includes('ocr')) score -= 50;
-        if (key.toLowerCase().includes('raw')) score -= 30;
-        if (key.toLowerCase().includes('thinking')) score -= 100; 
-        
-        candidates.push({ key, value: strVal, score });
-    });
-
-    return candidates.sort((a, b) => b.score - a.score);
-};
-
-// Robust getter that can extract embedded metadata if standard keys are missing
-const getExtractedField = (obj: any, targetType: 'name' | 'score' | 'id' | 'class'): any => {
-    if (!obj || typeof obj !== 'object') return undefined;
-
-    // 1. Try Standard JSON Keys first
-    const aliases: Record<string, string[]> = {
-        name: ['name', 'studentName', 'student_name', 'Name', 'Student', 'student', '姓名', '學生姓名', '名字'],
-        score: ['score', 'totalScore', 'total_score', 'Score', 'grade', 'Grade', 'points', 'Points', '得分', '分數', '成績', '總分'],
-        id: ['id', 'studentId', 'student_id', 'ID', 'StudentId', 'no', 'No', '學號', '編號', '班號'],
-        class: ['class', 'className', 'class_name', 'Class', 'grade_level', '班別', '班級']
-    };
-
-    const keysToCheck = aliases[targetType] || [];
-    const objKeys = Object.keys(obj);
-    for (const key of keysToCheck) {
-        if (obj[key] !== undefined && obj[key] !== null && obj[key] !== '') return obj[key];
-        const foundKey = objKeys.find(k => k.toLowerCase() === key.toLowerCase());
-        if (foundKey && obj[foundKey] !== undefined && obj[foundKey] !== null && obj[foundKey] !== '') return obj[foundKey];
-    }
-
-    // 2. If Score, try extracting from string value like "85/100"
-    if (targetType === 'score') {
-        // ... handled by safeNumber usually, but if it's strictly deep search needed:
-        // skip for now, safeNumber handles basic strings
-    }
-
-    // 3. Deep Text Mining (Regex Extraction)
-    // If we couldn't find the key, let's scan ALL string values for patterns like "姓名：XXX"
-    if (targetType === 'name' || targetType === 'id' || targetType === 'class') {
-        const allStrings = Object.values(obj).filter(v => typeof v === 'string').join('\n');
-        
-        if (targetType === 'name') {
-            const match = allStrings.match(/(?:姓名|Name)\s*[:：]\s*([^\s\n:：,，]+)/i);
-            if (match) return match[1];
-        }
-        if (targetType === 'class') {
-            const match = allStrings.match(/(?:班別|Class)\s*[:：]\s*([^\s\n:：,，]+)/i);
-            if (match) return match[1];
-        }
-        if (targetType === 'id') {
-            const match = allStrings.match(/(?:班號|學號|No\.?)\s*[:：]\s*([0-9A-Za-z]+)/i);
-            if (match) return match[1];
-        }
-    }
-
-    return undefined;
-};
-
-const findStudentArray = (data: any): any[] => {
-    if (!data) return [];
-    const commonKeys = ['studentReports', 'reports', 'students', 'results', 'data', 'items', 'list'];
-    for (const key of commonKeys) {
-        if (Array.isArray(data[key]) && data[key].length > 0) return data[key];
-    }
-    // Recursive search
-    let queue = [data];
-    let visited = new Set();
-    let bestCandidate: any[] = [];
-    let iterations = 0;
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 評分報告查看器</title>
     
-    while (queue.length > 0 && iterations < 1000) {
-        iterations++;
-        const current = queue.shift();
-        if (!current || typeof current !== 'object' || visited.has(current)) continue;
-        visited.add(current);
+    <!-- 引入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- 引入 React 和 ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    
+    <!-- 引入 Babel 用於解析 JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-        if (Array.isArray(current)) {
-            if (current.length > 0) {
-                const firstItem = current[0];
-                if (typeof firstItem === 'object') {
-                     // We loosen the check here to allow arrays that *might* be students even if keys are weird
-                     const hasName = getExtractedField(firstItem, 'name') !== undefined;
-                     const hasScore = getExtractedField(firstItem, 'score') !== undefined;
-                     
-                     if (hasName) bestCandidate = current; 
-                     if (hasName && hasScore) return current;
+    <!-- 引入 Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap');
+        
+        body {
+            font-family: 'Noto Sans TC', sans-serif;
+        }
+
+        /* 隱藏捲軸但保留功能 (Chrome/Safari/Webkit) */
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #e2e8f0;
+            border-radius: 3px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #cbd5e1;
+        }
+
+        /* 列印樣式 */
+        @media print {
+            @page { margin: 1cm; size: A4; }
+            body { background: white; -webkit-print-color-adjust: exact; }
+            aside, header, button, .no-print { display: none !important; }
+            #report-viewer { 
+                overflow: visible !important; 
+                height: auto !important; 
+                padding: 0 !important; 
+                background: white !important;
+                position: static !important;
+            }
+            main > div { 
+                box-shadow: none !important; 
+                border: none !important; 
+                max-width: none !important;
+                width: 100% !important;
+            }
+        }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-800 h-screen overflow-hidden">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useMemo, useEffect } = React;
+
+        // --- Icon Component Wrapper for Lucide (修正版) ---
+        const Icon = ({ name, size = 24, className = "" }) => {
+            const [svgHtml, setSvgHtml] = useState('');
+
+            useEffect(() => {
+                // 確保 lucide 已加載且圖標存在
+                if (window.lucide && window.lucide.icons && window.lucide.icons[name]) {
+                    const iconDef = window.lucide.icons[name];
+                    
+                    // 使用新版 API: createElement
+                    if (typeof window.lucide.createElement === 'function') {
+                        const svgElement = window.lucide.createElement(iconDef);
+                        
+                        // 設定屬性
+                        svgElement.setAttribute('width', size);
+                        svgElement.setAttribute('height', size);
+                        
+                        // 加入自訂樣式 (保留 lucide 原本的 class)
+                        if (className) {
+                            className.split(' ').forEach(cls => {
+                                if (cls.trim()) svgElement.classList.add(cls.trim());
+                            });
+                        }
+
+                        setSvgHtml(svgElement.outerHTML);
+                    }
+                }
+            }, [name, size, className]);
+
+            // 如果尚未生成 SVG，顯示佔位符以免版面跳動
+            if (!svgHtml) {
+                return <span style={{ width: size, height: size, display: 'inline-block' }}></span>;
+            }
+
+            return <span dangerouslySetInnerHTML={{ __html: svgHtml }} style={{ display: 'inline-flex', verticalAlign: 'middle' }} />;
+        };
+
+        // --- Helper Functions ---
+
+        const safeString = (val) => {
+            if (typeof val === 'string') return val;
+            if (typeof val === 'number') return String(val);
+            if (val === null || val === undefined) return '';
+            if (typeof val === 'object') {
+                const textKeys = ['text', 'content', 'message', 'value', 'markdown', 'report', 'feedback'];
+                for (const k of textKeys) {
+                    if (typeof val[k] === 'string') return val[k];
+                }
+                return JSON.stringify(val, null, 2);
+            }
+            return String(val);
+        };
+
+        const safeNumber = (val) => {
+            if (typeof val === 'number') return val;
+            if (typeof val === 'string') {
+                const match = val.match(/(\d+(\.\d+)?)/);
+                if (match) return parseFloat(match[0]);
+            }
+            return 0;
+        };
+
+        // --- Smart Field Logic ---
+
+        const getPotentialTextFields = (student) => {
+            if (!student || typeof student !== 'object') return [];
+
+            const candidates = [];
+
+            Object.keys(student).forEach(key => {
+                const val = student[key];
+                if (!val) return;
+                
+                let strVal = typeof val === 'string' ? val : safeString(val);
+                
+                if (strVal.length < 20 && !key.toLowerCase().includes('feedback') && !key.toLowerCase().includes('report')) return;
+
+                let score = 0;
+
+                // Positive Signals
+                if (key.toLowerCase().includes('feedback')) score += 50;
+                if (key.toLowerCase().includes('report')) score += 40;
+                if (key.toLowerCase().includes('analysis')) score += 30;
+                if (key.toLowerCase().includes('評語')) score += 50;
+                if (key.toLowerCase().includes('報告')) score += 40;
+                
+                // Content Signals
+                if (strVal.includes('得分') || strVal.includes('Score:')) score += 20;
+                if (strVal.includes('評語') || strVal.includes('Feedback:')) score += 20;
+                if (strVal.includes('**')) score += 5;
+                if (strVal.match(/\d+\s*\/\s*\d+/)) score += 10; 
+                if (strVal.includes('【評分結果】')) score += 100;
+
+                // Negative Signals
+                if (key.toLowerCase().includes('ocr')) score -= 50;
+                if (key.toLowerCase().includes('raw')) score -= 30;
+                if (key.toLowerCase().includes('thinking')) score -= 100; 
+                
+                candidates.push({ key, value: strVal, score });
+            });
+
+            return candidates.sort((a, b) => b.score - a.score);
+        };
+
+        const getExtractedField = (obj, targetType) => {
+            if (!obj || typeof obj !== 'object') return undefined;
+
+            // 1. Try Standard Keys
+            const aliases = {
+                name: ['name', 'studentName', 'student_name', 'Name', 'Student', 'student', '姓名', '學生姓名', '名字'],
+                score: ['score', 'totalScore', 'total_score', 'Score', 'grade', 'Grade', 'points', 'Points', '得分', '分數', '成績', '總分'],
+                id: ['id', 'studentId', 'student_id', 'ID', 'StudentId', 'no', 'No', '學號', '編號', '班號'],
+                class: ['class', 'className', 'class_name', 'Class', 'grade_level', '班別', '班級']
+            };
+
+            const keysToCheck = aliases[targetType] || [];
+            const objKeys = Object.keys(obj);
+            for (const key of keysToCheck) {
+                if (obj[key] !== undefined && obj[key] !== null && obj[key] !== '') return obj[key];
+                const foundKey = objKeys.find(k => k.toLowerCase() === key.toLowerCase());
+                if (foundKey && obj[foundKey] !== undefined && obj[foundKey] !== null && obj[foundKey] !== '') return obj[foundKey];
+            }
+
+            // 2. Regex Extraction from all strings
+            if (targetType === 'name' || targetType === 'id' || targetType === 'class') {
+                const allStrings = Object.values(obj).filter(v => typeof v === 'string').join('\n');
+                
+                if (targetType === 'name') {
+                    const match = allStrings.match(/(?:姓名|Name)\s*[:：]\s*([^\s\n:：,，]+)/i);
+                    if (match) return match[1];
+                }
+                if (targetType === 'class') {
+                    const match = allStrings.match(/(?:班別|Class)\s*[:：]\s*([^\s\n:：,，]+)/i);
+                    if (match) return match[1];
+                }
+                if (targetType === 'id') {
+                    const match = allStrings.match(/(?:班號|學號|No\.?)\s*[:：]\s*([0-9A-Za-z]+)/i);
+                    if (match) return match[1];
                 }
             }
-            continue;
-        }
-        for (const key in current) {
-            if (typeof current[key] === 'object') {
-                queue.push(current[key]);
+            return undefined;
+        };
+
+        const findStudentArray = (data) => {
+            if (!data) return [];
+            const commonKeys = ['studentReports', 'reports', 'students', 'results', 'data', 'items', 'list'];
+            for (const key of commonKeys) {
+                if (Array.isArray(data[key]) && data[key].length > 0) return data[key];
             }
-        }
-    }
-    return bestCandidate;
-};
-
-
-// --- Components ---
-
-const ScoreBadge = ({ score, max }: { score: number; max: number }) => {
-  const percentage = max > 0 ? (score / max) * 100 : 0;
-  
-  let colorClass = "bg-red-100 text-red-700 border-red-200";
-  let Icon = AlertCircle;
-
-  if (percentage >= 80) {
-    colorClass = "bg-green-100 text-green-700 border-green-200";
-    Icon = Award;
-  } else if (percentage >= 60) {
-    colorClass = "bg-blue-100 text-blue-700 border-blue-200";
-    Icon = CheckCircle2;
-  } else if (percentage >= 40) {
-    colorClass = "bg-yellow-100 text-yellow-700 border-yellow-200";
-    Icon = AlertCircle;
-  }
-
-  return (
-    <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full border text-sm font-bold ${colorClass}`}>
-      <Icon size={14} />
-      <span>{score} / {max}</span>
-    </div>
-  );
-};
-
-const FormattedText = ({ text }: { text: any }) => {
-  const content = safeString(text);
-
-  if (!content) return (
-      <div className="flex flex-col items-center justify-center p-8 text-slate-400 border-2 border-dashed border-slate-200 rounded-lg">
-          <AlertCircle size={32} className="mb-2 opacity-50"/>
-          <span>無詳細內容</span>
-      </div>
-  );
-
-  let cleanText = content;
-  
-  cleanText = cleanText.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
-  cleanText = cleanText.replace(/^\s*Thinking\.\.\..*$/gim, '');
-  cleanText = cleanText.replace(/^>.*$/gm, '');
-  cleanText = cleanText.replace(/^AI Thinking:.*$/gim, '');
-
-  const startMarkers = ['【評分結果】', '## 評分結果', '# 評分結果', '**評分結果**', '總分：'];
-  for (const marker of startMarkers) {
-      const index = cleanText.indexOf(marker);
-      if (index !== -1) {
-          cleanText = cleanText.substring(index);
-          break; 
-      }
-  }
-  
-  cleanText = cleanText.trim();
-  const lines = cleanText.split('\n');
-
-  return (
-    <div className="space-y-2 text-slate-700 leading-relaxed font-sans text-base">
-      {lines.map((line, idx) => {
-        if (line.match(/^(#+\s|.*[甲乙丙丁戊己庚辛壬癸]部、|.*[A-Z] Part|Section|【.*】)/)) {
-          return (
-            <h3 key={idx} className="text-xl font-bold text-slate-800 mt-8 mb-4 border-b border-slate-200 pb-2 flex items-center gap-3">
-              <div className="w-1.5 h-6 bg-indigo-500 rounded-full"></div>
-              {line.replace(/^#+\s/, '').replace(/[【】]/g, '')}
-            </h3>
-          );
-        }
-
-        if (line.match(/^---/)) {
-            return <hr key={idx} className="my-6 border-slate-200" />;
-        }
-
-        if (line.trim().startsWith('|')) {
-             const cells = line.split('|').filter((c, i, arr) => i !== 0 && i !== arr.length - 1);
-             if (line.match(/\|[\s-]*:?[\s-]*\|/)) return null; 
-
-             return (
-                 <div key={idx} className="grid grid-flow-col auto-cols-fr gap-2 border-b border-slate-100 py-2 text-sm overflow-x-auto">
-                     {cells.map((c, cIdx) => (
-                         <span key={cIdx} className="px-2 truncate" title={c.trim()}>{c.trim()}</span>
-                     ))}
-                 </div>
-             )
-        }
-
-        if (line.includes('**')) {
-           const parts = line.split(/(\*\*.*?\*\*)/g);
-           return (
-             <div key={idx} className="ml-0 my-1.5">
-               {parts.map((part, pIdx) => {
-                 if (part.startsWith('**') && part.endsWith('**')) {
-                   return <strong key={pIdx} className="text-indigo-900 font-bold">{part.slice(2, -2)}</strong>;
-                 }
-                 return <span key={pIdx}>{part}</span>;
-               })}
-             </div>
-           );
-        }
-
-        if (line.trim().startsWith('* ') || line.trim().startsWith('- ') || line.trim().startsWith('• ')) {
-           return (
-             <div key={idx} className="flex gap-3 ml-2 my-1.5">
-               <span className="text-indigo-400 mt-1.5 font-bold">•</span>
-               <span className="flex-1 text-slate-600">{line.replace(/^[\*\-•]\s/, '')}</span>
-             </div>
-           );
-        }
-
-        if (line.match(/^\d+\./)) {
-           return (
-            <div key={idx} className="ml-2 font-bold text-slate-800 mt-4 mb-1">
-                {line}
-            </div>
-           )
-        }
-
-        if (!line.trim()) return <div key={idx} className="h-2" />;
-
-        return <p key={idx} className="text-slate-600 my-1.5 leading-7">{line}</p>;
-      })}
-    </div>
-  );
-};
-
-// --- Main Application ---
-
-export default function App() {
-  const [data, setData] = useState<any | null>(null);
-  const [students, setStudents] = useState<any[]>([]);
-  const [selectedStudentIndex, setSelectedStudentIndex] = useState<number>(0);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [dragActive, setDragActive] = useState(false);
-  const [overrideFieldKey, setOverrideFieldKey] = useState<string | null>(null);
-
-  const processFile = (file: File) => {
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      try {
-        const json = JSON.parse(event.target?.result as string);
-        setData(json);
-        const foundStudents = findStudentArray(json);
-        setStudents(foundStudents);
-        setSelectedStudentIndex(0);
-        setOverrideFieldKey(null);
-      } catch (error) {
-        console.error(error);
-        alert("錯誤：無法解析 JSON 檔案。");
-      }
-    };
-    reader.readAsText(file);
-  };
-
-  const currentStudent = students[selectedStudentIndex];
-  
-  const infoObj = data?.assignmentInfo || data || {};
-  const assignmentName = safeString(infoObj.assignmentName || infoObj.title || "評分報告");
-  const className = safeString(infoObj.className || infoObj.class || "班級未知");
-  const maxScore = safeNumber(infoObj.maxScore || 100);
-  
-  const stats = useMemo(() => {
-      if (!students.length) return null;
-      const scores = students.map(s => safeNumber(getExtractedField(s, 'score')));
-      const total = scores.reduce((a, b) => a + b, 0);
-      return {
-          avg: (total / scores.length).toFixed(1),
-          max: Math.max(...scores),
-          count: scores.length
-      };
-  }, [students]);
-
-  const filteredStudents = useMemo(() => {
-      return students.filter(s => {
-          const name = safeString(getExtractedField(s, 'name') || "Unknown").toLowerCase();
-          return name.includes(searchTerm.toLowerCase());
-      });
-  }, [students, searchTerm]);
-
-  const contentCandidates = useMemo(() => {
-      return getPotentialTextFields(currentStudent);
-  }, [currentStudent]);
-
-  const activeContent = useMemo(() => {
-      if (!contentCandidates.length) return null;
-      if (overrideFieldKey) {
-          const found = contentCandidates.find(c => c.key === overrideFieldKey);
-          if (found) return found;
-      }
-      return contentCandidates[0];
-  }, [contentCandidates, overrideFieldKey]);
-
-
-  if (!data) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 flex flex-col items-center justify-center p-6 font-sans">
-        <div className="bg-white p-12 rounded-3xl shadow-xl max-w-2xl w-full text-center border border-slate-100">
-            <div className="bg-indigo-100 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6">
-                <FileText className="text-indigo-600" size={40} />
-            </div>
-            <h1 className="text-3xl font-bold text-slate-800 mb-3">AI 評分報告查看器</h1>
-            <p className="text-slate-500 mb-8 max-w-md mx-auto">請上傳您的 JSON 評分報告檔案。系統將自動分析數據並生成可列印的學生報告。</p>
-
-            <div 
-            className={`w-full h-48 border-2 border-dashed rounded-2xl flex flex-col items-center justify-center transition-all cursor-pointer bg-slate-50
-                ${dragActive ? 'border-indigo-500 bg-indigo-50 scale-[1.02]' : 'border-slate-300 hover:border-indigo-400 hover:bg-white'}`}
-            onDragEnter={(e) => { e.preventDefault(); setDragActive(true); }}
-            onDragLeave={(e) => { e.preventDefault(); setDragActive(false); }}
-            onDragOver={(e) => { e.preventDefault(); }}
-            onDrop={(e) => { 
-                e.preventDefault(); 
-                setDragActive(false); 
-                if (e.dataTransfer.files?.[0]) processFile(e.dataTransfer.files[0]);
-            }}
-            >
-            <input 
-                type="file" 
-                id="file-upload" 
-                className="hidden" 
-                accept=".json" 
-                onChange={(e) => e.target.files?.[0] && processFile(e.target.files[0])}
-            />
-            <label htmlFor="file-upload" className="flex flex-col items-center cursor-pointer w-full h-full justify-center">
-                <p className="text-lg font-semibold text-slate-700">點擊或拖放 JSON 檔案至此</p>
-                <p className="text-sm text-slate-400 mt-2">系統將自動隱藏 AI 思考過程，僅顯示最終報告</p>
-            </label>
-            </div>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex flex-col h-screen bg-slate-100 font-sans text-slate-800 overflow-hidden">
-        
-        {/* Top Navbar */}
-        <header className="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between shadow-sm shrink-0 z-20">
-            <div className="flex items-center gap-4">
-                <div className="bg-indigo-600 text-white p-2.5 rounded-xl shadow-sm">
-                    <LayoutDashboard size={20} />
-                </div>
-                <div>
-                    <h1 className="text-lg font-bold text-slate-800 leading-tight">{assignmentName}</h1>
-                    <div className="flex items-center gap-2 text-xs text-slate-500 font-medium">
-                        <span className="bg-slate-100 px-2 py-0.5 rounded text-slate-600">{className}</span>
-                        {infoObj.date && <span>{safeString(infoObj.date)}</span>}
-                    </div>
-                </div>
-            </div>
-
-            {stats && (
-                <div className="flex items-center gap-6 md:gap-8">
-                    <div className="hidden md:block text-right">
-                        <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">總人數</div>
-                        <div className="text-xl font-bold text-slate-700 leading-none">{stats.count}</div>
-                    </div>
-                    <div className="text-right">
-                        <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">平均分</div>
-                        <div className="text-xl font-bold text-indigo-600 leading-none">{stats.avg}</div>
-                    </div>
-                    <div className="text-right pl-6 border-l border-slate-100">
-                        <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">最高分</div>
-                        <div className="text-xl font-bold text-green-600 leading-none">{stats.max}</div>
-                    </div>
-                </div>
-            )}
-        </header>
-
-        <div className="flex flex-1 overflow-hidden">
+            // Recursive search
+            let queue = [data];
+            let visited = new Set();
+            let bestCandidate = [];
+            let iterations = 0;
             
-            {/* Sidebar List */}
-            <aside className="w-80 bg-white border-r border-slate-200 flex flex-col shrink-0 print:hidden">
-                <div className="p-4 border-b border-slate-100">
-                    <div className="relative group">
-                        <Search className="absolute left-3 top-2.5 text-slate-400 group-focus-within:text-indigo-500 transition-colors" size={16} />
+            while (queue.length > 0 && iterations < 1000) {
+                iterations++;
+                const current = queue.shift();
+                if (!current || typeof current !== 'object' || visited.has(current)) continue;
+                visited.add(current);
+
+                if (Array.isArray(current)) {
+                    if (current.length > 0) {
+                        const firstItem = current[0];
+                        if (typeof firstItem === 'object') {
+                             const hasName = getExtractedField(firstItem, 'name') !== undefined;
+                             const hasScore = getExtractedField(firstItem, 'score') !== undefined;
+                             
+                             if (hasName) bestCandidate = current; 
+                             if (hasName && hasScore) return current;
+                        }
+                    }
+                    continue;
+                }
+                for (const key in current) {
+                    if (typeof current[key] === 'object') {
+                        queue.push(current[key]);
+                    }
+                }
+            }
+            return bestCandidate;
+        };
+
+        // --- Sub Components ---
+
+        const ScoreBadge = ({ score, max }) => {
+            const percentage = max > 0 ? (score / max) * 100 : 0;
+            let colorClass = "bg-red-100 text-red-700 border-red-200";
+            let iconName = "AlertCircle";
+
+            if (percentage >= 80) {
+                colorClass = "bg-green-100 text-green-700 border-green-200";
+                iconName = "Award";
+            } else if (percentage >= 60) {
+                colorClass = "bg-blue-100 text-blue-700 border-blue-200";
+                iconName = "CheckCircle2";
+            } else if (percentage >= 40) {
+                colorClass = "bg-yellow-100 text-yellow-700 border-yellow-200";
+                iconName = "AlertCircle";
+            }
+
+            return (
+                <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full border text-sm font-bold ${colorClass}`}>
+                    <Icon name={iconName} size={14} />
+                    <span>{score} / {max}</span>
+                </div>
+            );
+        };
+
+        const FormattedText = ({ text }) => {
+            const content = safeString(text);
+
+            if (!content) return (
+                <div className="flex flex-col items-center justify-center p-8 text-slate-400 border-2 border-dashed border-slate-200 rounded-lg">
+                    <Icon name="AlertCircle" size={32} className="mb-2 opacity-50"/>
+                    <span>無詳細內容</span>
+                </div>
+            );
+
+            let cleanText = content;
+            
+            // Clean AI Thinking artifacts
+            cleanText = cleanText.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+            cleanText = cleanText.replace(/^\s*Thinking\.\.\..*$/gim, '');
+            cleanText = cleanText.replace(/^>.*$/gm, '');
+            cleanText = cleanText.replace(/^AI Thinking:.*$/gim, '');
+
+            // Smart Crop
+            const startMarkers = ['【評分結果】', '## 評分結果', '# 評分結果', '**評分結果**', '總分：'];
+            for (const marker of startMarkers) {
+                const index = cleanText.indexOf(marker);
+                if (index !== -1) {
+                    cleanText = cleanText.substring(index);
+                    break; 
+                }
+            }
+            
+            cleanText = cleanText.trim();
+            const lines = cleanText.split('\n');
+
+            return (
+                <div className="space-y-2 text-slate-700 leading-relaxed font-sans text-base">
+                {lines.map((line, idx) => {
+                    // Headers
+                    if (line.match(/^(#+\s|.*[甲乙丙丁戊己庚辛壬癸]部、|.*[A-Z] Part|Section|【.*】)/)) {
+                    return (
+                        <h3 key={idx} className="text-xl font-bold text-slate-800 mt-8 mb-4 border-b border-slate-200 pb-2 flex items-center gap-3">
+                        <div className="w-1.5 h-6 bg-indigo-500 rounded-full"></div>
+                        {line.replace(/^#+\s/, '').replace(/[【】]/g, '')}
+                        </h3>
+                    );
+                    }
+
+                    // HR
+                    if (line.match(/^---/)) {
+                        return <hr key={idx} className="my-6 border-slate-200" />;
+                    }
+
+                    // Tables
+                    if (line.trim().startsWith('|')) {
+                        const cells = line.split('|').filter((c, i, arr) => i !== 0 && i !== arr.length - 1);
+                        if (line.match(/\|[\s-]*:?[\s-]*\|/)) return null; // skip separator row
+
+                        return (
+                            <div key={idx} className="grid grid-flow-col auto-cols-fr gap-2 border-b border-slate-100 py-2 text-sm overflow-x-auto">
+                                {cells.map((c, cIdx) => (
+                                    <span key={cIdx} className="px-2 truncate" title={c.trim()}>{c.trim()}</span>
+                                ))}
+                            </div>
+                        )
+                    }
+
+                    // Bold keys
+                    if (line.includes('**')) {
+                        const parts = line.split(/(\*\*.*?\*\*)/g);
+                        return (
+                            <div key={idx} className="ml-0 my-1.5">
+                            {parts.map((part, pIdx) => {
+                                if (part.startsWith('**') && part.endsWith('**')) {
+                                return <strong key={pIdx} className="text-indigo-900 font-bold">{part.slice(2, -2)}</strong>;
+                                }
+                                return <span key={pIdx}>{part}</span>;
+                            })}
+                            </div>
+                        );
+                    }
+
+                    // Lists
+                    if (line.trim().startsWith('* ') || line.trim().startsWith('- ') || line.trim().startsWith('• ')) {
+                        return (
+                            <div key={idx} className="flex gap-3 ml-2 my-1.5">
+                            <span className="text-indigo-400 mt-1.5 font-bold">•</span>
+                            <span className="flex-1 text-slate-600">{line.replace(/^[\*\-•]\s/, '')}</span>
+                            </div>
+                        );
+                    }
+
+                    // Numbered lists
+                    if (line.match(/^\d+\./)) {
+                        return (
+                            <div key={idx} className="ml-2 font-bold text-slate-800 mt-4 mb-1">
+                                {line}
+                            </div>
+                        )
+                    }
+
+                    if (!line.trim()) return <div key={idx} className="h-2" />;
+
+                    return <p key={idx} className="text-slate-600 my-1.5 leading-7">{line}</p>;
+                })}
+                </div>
+            );
+        };
+
+        // --- Main App ---
+
+        const App = () => {
+            const [data, setData] = useState(null);
+            const [students, setStudents] = useState([]);
+            const [selectedStudentIndex, setSelectedStudentIndex] = useState(0);
+            const [searchTerm, setSearchTerm] = useState('');
+            const [dragActive, setDragActive] = useState(false);
+            const [overrideFieldKey, setOverrideFieldKey] = useState(null);
+
+            const processFile = (file) => {
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                try {
+                    const json = JSON.parse(event.target.result);
+                    setData(json);
+                    const foundStudents = findStudentArray(json);
+                    setStudents(foundStudents);
+                    setSelectedStudentIndex(0);
+                    setOverrideFieldKey(null);
+                } catch (error) {
+                    console.error(error);
+                    alert("錯誤：無法解析 JSON 檔案。");
+                }
+                };
+                reader.readAsText(file);
+            };
+
+            const currentStudent = students[selectedStudentIndex];
+            
+            const infoObj = data?.assignmentInfo || data || {};
+            const assignmentName = safeString(infoObj.assignmentName || infoObj.title || "評分報告");
+            const className = safeString(infoObj.className || infoObj.class || "班級未知");
+            const maxScore = safeNumber(infoObj.maxScore || 100);
+            
+            const stats = useMemo(() => {
+                if (!students.length) return null;
+                const scores = students.map(s => safeNumber(getExtractedField(s, 'score')));
+                const total = scores.reduce((a, b) => a + b, 0);
+                return {
+                    avg: (total / scores.length).toFixed(1),
+                    max: Math.max(...scores),
+                    count: scores.length
+                };
+            }, [students]);
+
+            const filteredStudents = useMemo(() => {
+                return students.filter(s => {
+                    const name = safeString(getExtractedField(s, 'name') || "Unknown").toLowerCase();
+                    return name.includes(searchTerm.toLowerCase());
+                });
+            }, [students, searchTerm]);
+
+            const contentCandidates = useMemo(() => {
+                return getPotentialTextFields(currentStudent);
+            }, [currentStudent]);
+
+            const activeContent = useMemo(() => {
+                if (!contentCandidates.length) return null;
+                if (overrideFieldKey) {
+                    const found = contentCandidates.find(c => c.key === overrideFieldKey);
+                    if (found) return found;
+                }
+                return contentCandidates[0];
+            }, [contentCandidates, overrideFieldKey]);
+
+            // --- Views ---
+
+            if (!data) {
+                return (
+                <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 flex flex-col items-center justify-center p-6 font-sans">
+                    <div className="bg-white p-12 rounded-3xl shadow-xl max-w-2xl w-full text-center border border-slate-100">
+                        <div className="bg-indigo-100 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6">
+                            <Icon name="FileText" className="text-indigo-600" size={40} />
+                        </div>
+                        <h1 className="text-3xl font-bold text-slate-800 mb-3">AI 評分報告查看器</h1>
+                        <p className="text-slate-500 mb-8 max-w-md mx-auto">請上傳您的 JSON 評分報告檔案。系統將自動分析數據、提取個資並生成可列印的學生報告。</p>
+
+                        <div 
+                        className={`w-full h-48 border-2 border-dashed rounded-2xl flex flex-col items-center justify-center transition-all cursor-pointer bg-slate-50
+                            ${dragActive ? 'border-indigo-500 bg-indigo-50 scale-[1.02]' : 'border-slate-300 hover:border-indigo-400 hover:bg-white'}`}
+                        onDragEnter={(e) => { e.preventDefault(); setDragActive(true); }}
+                        onDragLeave={(e) => { e.preventDefault(); setDragActive(false); }}
+                        onDragOver={(e) => { e.preventDefault(); }}
+                        onDrop={(e) => { 
+                            e.preventDefault(); 
+                            setDragActive(false); 
+                            if (e.dataTransfer.files?.[0]) processFile(e.dataTransfer.files[0]);
+                        }}
+                        >
                         <input 
-                            type="text" 
-                            placeholder="搜尋學生..." 
-                            className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all"
-                            value={searchTerm}
-                            onChange={(e) => setSearchTerm(e.target.value)}
+                            type="file" 
+                            id="file-upload" 
+                            className="hidden" 
+                            accept=".json" 
+                            onChange={(e) => e.target.files?.[0] && processFile(e.target.files[0])}
                         />
+                        <label htmlFor="file-upload" className="flex flex-col items-center cursor-pointer w-full h-full justify-center">
+                            <p className="text-lg font-semibold text-slate-700">點擊或拖放 JSON 檔案至此</p>
+                            <p className="text-sm text-slate-400 mt-2">支援自動過濾 AI 思考過程</p>
+                        </label>
+                        </div>
                     </div>
                 </div>
+                );
+            }
 
-                <div className="flex-1 overflow-y-auto custom-scrollbar">
-                    {filteredStudents.length === 0 ? (
-                        <div className="p-8 text-center text-slate-400 text-sm">找不到符合的學生</div>
-                    ) : (
-                        filteredStudents.map((s, idx) => {
-                            const originalIdx = students.indexOf(s);
-                            const isActive = originalIdx === selectedStudentIndex;
-                            
-                            const sName = safeString(getExtractedField(s, 'name')) || `Student ${idx+1}`;
-                            const sId = safeString(getExtractedField(s, 'id'));
-                            const sScore = safeNumber(getExtractedField(s, 'score'));
+            return (
+                <div className="flex flex-col h-screen bg-slate-100 font-sans text-slate-800 overflow-hidden">
+                    
+                    {/* Header */}
+                    <header className="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between shadow-sm shrink-0 z-20">
+                        <div className="flex items-center gap-4">
+                            <div className="bg-indigo-600 text-white p-2.5 rounded-xl shadow-sm">
+                                <Icon name="LayoutDashboard" size={20} />
+                            </div>
+                            <div>
+                                <h1 className="text-lg font-bold text-slate-800 leading-tight">{assignmentName}</h1>
+                                <div className="flex items-center gap-2 text-xs text-slate-500 font-medium">
+                                    <span className="bg-slate-100 px-2 py-0.5 rounded text-slate-600">{className}</span>
+                                    {infoObj.date && <span>{safeString(infoObj.date)}</span>}
+                                </div>
+                            </div>
+                        </div>
 
-                            return (
-                                <button
-                                    key={idx}
-                                    onClick={() => {
-                                        setSelectedStudentIndex(originalIdx);
-                                        setOverrideFieldKey(null);
-                                    }}
-                                    className={`w-full text-left px-5 py-3.5 border-b border-slate-50 transition-all flex items-center justify-between group
-                                        ${isActive ? 'bg-indigo-50 border-l-4 border-l-indigo-600' : 'hover:bg-slate-50 border-l-4 border-l-transparent'}`}
-                                >
-                                    <div className="flex items-center gap-3 min-w-0">
-                                        <div className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold shrink-0 shadow-sm transition-colors
-                                            ${isActive ? 'bg-indigo-600 text-white' : 'bg-white border border-slate-200 text-slate-500 group-hover:border-indigo-300'}`}>
-                                            {sName.charAt(0)}
-                                        </div>
-                                        <div className="min-w-0 flex-1">
-                                            <div className={`text-sm font-semibold truncate ${isActive ? 'text-indigo-900' : 'text-slate-700'}`}>
-                                                {sName}
-                                            </div>
-                                            <div className="text-xs text-slate-400 truncate font-mono mt-0.5">
-                                                {sId ? `ID: ${sId}` : 'No ID'}
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div className={`text-sm font-bold ml-2 ${sScore >= 60 ? 'text-green-600' : 'text-red-500'}`}>
-                                        {sScore}
-                                    </div>
-                                </button>
-                            );
-                        })
-                    )}
-                </div>
-            </aside>
+                        {stats && (
+                            <div className="flex items-center gap-6 md:gap-8">
+                                <div className="hidden md:block text-right">
+                                    <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">總人數</div>
+                                    <div className="text-xl font-bold text-slate-700 leading-none">{stats.count}</div>
+                                </div>
+                                <div className="text-right">
+                                    <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">平均分</div>
+                                    <div className="text-xl font-bold text-indigo-600 leading-none">{stats.avg}</div>
+                                </div>
+                                <div className="text-right pl-6 border-l border-slate-100">
+                                    <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">最高分</div>
+                                    <div className="text-xl font-bold text-green-600 leading-none">{stats.max}</div>
+                                </div>
+                            </div>
+                        )}
+                    </header>
 
-            {/* Main Report Preview */}
-            <main className="flex-1 overflow-y-auto bg-slate-100 p-4 md:p-8" id="report-viewer">
-                {currentStudent ? (() => {
-                     const sName = safeString(getExtractedField(currentStudent, 'name')) || "未命名";
-                     const sScore = safeNumber(getExtractedField(currentStudent, 'score'));
-                     const sClass = safeString(getExtractedField(currentStudent, 'class'));
-                     const sId = safeString(getExtractedField(currentStudent, 'id'));
-
-                    return (
-                        <div className="max-w-4xl mx-auto bg-white rounded-2xl shadow-sm overflow-hidden border border-slate-200 print:border-0 print:shadow-none print:max-w-none">
-                            
-                            {/* Paper Header */}
-                            <div className="bg-slate-900 text-white p-8 print:bg-white print:text-black print:border-b-2 print:border-black print:p-0 print:mb-8">
-                                <div className="flex justify-between items-start">
-                                    <div>
-                                        <div className="text-indigo-300 font-bold tracking-wider text-xs uppercase mb-2 print:text-slate-500">Assessment Report</div>
-                                        <h2 className="text-3xl font-bold mb-2">{sName}</h2>
-                                        <p className="opacity-80 flex items-center gap-2 text-sm print:text-slate-600">
-                                            <span>{assignmentName}</span>
-                                            {sClass && (
-                                                <>
-                                                    <span className="w-1 h-1 bg-white rounded-full opacity-50 print:bg-black"></span>
-                                                    <span>{sClass}</span>
-                                                </>
-                                            )}
-                                            {sId && (
-                                                <>
-                                                    <span className="w-1 h-1 bg-white rounded-full opacity-50 print:bg-black"></span>
-                                                    <span>#{sId}</span>
-                                                </>
-                                            )}
-                                        </p>
+                    <div className="flex flex-1 overflow-hidden">
+                        
+                        {/* Sidebar */}
+                        <aside className="w-80 bg-white border-r border-slate-200 flex flex-col shrink-0 print:hidden">
+                            <div className="p-4 border-b border-slate-100">
+                                <div className="relative group">
+                                    <div className="absolute left-3 top-2.5 text-slate-400">
+                                        <Icon name="Search" size={16} />
                                     </div>
-                                    <div className="flex flex-col items-end">
-                                        <div className="text-5xl font-bold tracking-tight mb-2">{sScore}</div>
-                                        <ScoreBadge score={sScore} max={maxScore} />
-                                    </div>
+                                    <input 
+                                        type="text" 
+                                        placeholder="搜尋學生..." 
+                                        className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all"
+                                        value={searchTerm}
+                                        onChange={(e) => setSearchTerm(e.target.value)}
+                                    />
                                 </div>
                             </div>
 
-                            {/* Paper Body */}
-                            <div className="p-8 md:p-12 min-h-[500px]">
-                                <div className="flex justify-between items-end mb-6 border-b border-slate-100 pb-4 print:hidden">
-                                    <div className="flex items-center gap-2 text-slate-400 text-sm font-bold uppercase tracking-wider">
-                                        <FileText size={16} />
-                                        <span>評語與詳細分析</span>
-                                    </div>
-                                    
-                                    {contentCandidates.length > 1 && (
-                                        <div className="relative group">
-                                            <div className="flex items-center gap-2 text-xs text-slate-500 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200 cursor-pointer hover:bg-white hover:shadow-sm transition-all">
-                                                <Eye size={12} />
-                                                <span>顯示: {activeContent?.key || '自動'}</span>
-                                                <ChevronDown size={12} />
-                                            </div>
-                                            <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-slate-200 rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-10 overflow-hidden">
-                                                <div className="py-1">
-                                                    {contentCandidates.map((c, i) => (
-                                                        <button 
-                                                            key={i}
-                                                            onClick={() => setOverrideFieldKey(c.key)}
-                                                            className={`w-full text-left px-4 py-2 text-xs hover:bg-slate-50 flex justify-between items-center
-                                                                ${activeContent?.key === c.key ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-slate-600'}`}
-                                                        >
-                                                            <span className="truncate flex-1">{c.key}</span>
-                                                            {c.score > 20 && <span className="bg-green-100 text-green-700 px-1.5 rounded text-[10px]">推薦</span>}
-                                                        </button>
-                                                    ))}
+                            <div className="flex-1 overflow-y-auto custom-scrollbar">
+                                {filteredStudents.length === 0 ? (
+                                    <div className="p-8 text-center text-slate-400 text-sm">找不到符合的學生</div>
+                                ) : (
+                                    filteredStudents.map((s, idx) => {
+                                        const originalIdx = students.indexOf(s);
+                                        const isActive = originalIdx === selectedStudentIndex;
+                                        
+                                        const sName = safeString(getExtractedField(s, 'name')) || `Student ${idx+1}`;
+                                        const sId = safeString(getExtractedField(s, 'id'));
+                                        const sScore = safeNumber(getExtractedField(s, 'score'));
+
+                                        return (
+                                            <button
+                                                key={idx}
+                                                onClick={() => {
+                                                    setSelectedStudentIndex(originalIdx);
+                                                    setOverrideFieldKey(null);
+                                                }}
+                                                className={`w-full text-left px-5 py-3.5 border-b border-slate-50 transition-all flex items-center justify-between group
+                                                    ${isActive ? 'bg-indigo-50 border-l-4 border-l-indigo-600' : 'hover:bg-slate-50 border-l-4 border-l-transparent'}`}
+                                            >
+                                                <div className="flex items-center gap-3 min-w-0">
+                                                    <div className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold shrink-0 shadow-sm transition-colors
+                                                        ${isActive ? 'bg-indigo-600 text-white' : 'bg-white border border-slate-200 text-slate-500 group-hover:border-indigo-300'}`}>
+                                                        {sName.charAt(0)}
+                                                    </div>
+                                                    <div className="min-w-0 flex-1">
+                                                        <div className={`text-sm font-semibold truncate ${isActive ? 'text-indigo-900' : 'text-slate-700'}`}>
+                                                            {sName}
+                                                        </div>
+                                                        <div className="text-xs text-slate-400 truncate font-mono mt-0.5">
+                                                            {sId ? `ID: ${sId}` : 'No ID'}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <div className={`text-sm font-bold ml-2 ${sScore >= 60 ? 'text-green-600' : 'text-red-500'}`}>
+                                                    {sScore}
+                                                </div>
+                                            </button>
+                                        );
+                                    })
+                                )}
+                            </div>
+                        </aside>
+
+                        {/* Main Content */}
+                        <main className="flex-1 overflow-y-auto bg-slate-100 p-4 md:p-8" id="report-viewer">
+                            {currentStudent ? (() => {
+                                const sName = safeString(getExtractedField(currentStudent, 'name')) || "未命名";
+                                const sScore = safeNumber(getExtractedField(currentStudent, 'score'));
+                                const sClass = safeString(getExtractedField(currentStudent, 'class'));
+                                const sId = safeString(getExtractedField(currentStudent, 'id'));
+
+                                return (
+                                    <div className="max-w-4xl mx-auto bg-white rounded-2xl shadow-sm overflow-hidden border border-slate-200 print:border-0 print:shadow-none print:max-w-none">
+                                        
+                                        {/* Report Header */}
+                                        <div className="bg-slate-900 text-white p-8 print:bg-white print:text-black print:border-b-2 print:border-black print:p-0 print:mb-8">
+                                            <div className="flex justify-between items-start">
+                                                <div>
+                                                    <div className="text-indigo-300 font-bold tracking-wider text-xs uppercase mb-2 print:text-slate-500">Assessment Report</div>
+                                                    <h2 className="text-3xl font-bold mb-2">{sName}</h2>
+                                                    <p className="opacity-80 flex items-center gap-2 text-sm print:text-slate-600">
+                                                        <span>{assignmentName}</span>
+                                                        {sClass && (
+                                                            <>
+                                                                <span className="w-1 h-1 bg-white rounded-full opacity-50 print:bg-black"></span>
+                                                                <span>{sClass}</span>
+                                                            </>
+                                                        )}
+                                                        {sId && (
+                                                            <>
+                                                                <span className="w-1 h-1 bg-white rounded-full opacity-50 print:bg-black"></span>
+                                                                <span>#{sId}</span>
+                                                            </>
+                                                        )}
+                                                    </p>
+                                                </div>
+                                                <div className="flex flex-col items-end">
+                                                    <div className="text-5xl font-bold tracking-tight mb-2">{sScore}</div>
+                                                    <ScoreBadge score={sScore} max={maxScore} />
                                                 </div>
                                             </div>
                                         </div>
-                                    )}
-                                </div>
-                                
-                                <div className="prose prose-slate max-w-none">
-                                    <FormattedText text={activeContent?.value} />
-                                </div>
 
-                                {/* Footer for Print */}
-                                <div className="mt-16 pt-8 border-t border-slate-100 flex justify-between text-slate-400 text-xs font-mono">
-                                    <span>Generated via AI Grading System</span>
-                                    <span>{new Date().toLocaleDateString()}</span>
+                                        {/* Report Body */}
+                                        <div className="p-8 md:p-12 min-h-[500px]">
+                                            <div className="flex justify-between items-end mb-6 border-b border-slate-100 pb-4 print:hidden">
+                                                <div className="flex items-center gap-2 text-slate-400 text-sm font-bold uppercase tracking-wider">
+                                                    <Icon name="FileText" size={16} />
+                                                    <span>評語與詳細分析</span>
+                                                </div>
+                                                
+                                                {contentCandidates.length > 1 && (
+                                                    <div className="relative group">
+                                                        <div className="flex items-center gap-2 text-xs text-slate-500 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200 cursor-pointer hover:bg-white hover:shadow-sm transition-all">
+                                                            <Icon name="Eye" size={12} />
+                                                            <span>顯示: {activeContent?.key || '自動'}</span>
+                                                            <Icon name="ChevronDown" size={12} />
+                                                        </div>
+                                                        <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-slate-200 rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-10 overflow-hidden">
+                                                            <div className="py-1">
+                                                                {contentCandidates.map((c, i) => (
+                                                                    <button 
+                                                                        key={i}
+                                                                        onClick={() => setOverrideFieldKey(c.key)}
+                                                                        className={`w-full text-left px-4 py-2 text-xs hover:bg-slate-50 flex justify-between items-center
+                                                                            ${activeContent?.key === c.key ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-slate-600'}`}
+                                                                    >
+                                                                        <span className="truncate flex-1">{c.key}</span>
+                                                                        {c.score > 20 && <span className="bg-green-100 text-green-700 px-1.5 rounded text-[10px]">推薦</span>}
+                                                                    </button>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                            
+                                            <div className="prose prose-slate max-w-none">
+                                                <FormattedText text={activeContent?.value} />
+                                            </div>
+
+                                            {/* Footer */}
+                                            <div className="mt-16 pt-8 border-t border-slate-100 flex justify-between text-slate-400 text-xs font-mono">
+                                                <span>Generated via AI Grading System</span>
+                                                <span>{new Date().toLocaleDateString()}</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })() : (
+                                <div className="h-full flex flex-col items-center justify-center text-slate-400">
+                                    <div className="w-16 h-16 bg-slate-200 rounded-full flex items-center justify-center mb-4">
+                                        <Icon name="User" size={32} className="opacity-50" />
+                                    </div>
+                                    <p className="font-medium">請從左側列表選擇一位學生</p>
                                 </div>
-                            </div>
-                        </div>
-                    );
-                })() : (
-                    <div className="h-full flex flex-col items-center justify-center text-slate-400">
-                        <div className="w-16 h-16 bg-slate-200 rounded-full flex items-center justify-center mb-4">
-                            <User size={32} className="opacity-50" />
-                        </div>
-                        <p className="font-medium">請從左側列表選擇一位學生</p>
+                            )}
+                        </main>
                     </div>
-                )}
-            </main>
-        </div>
 
-        {/* Print FAB */}
-        {currentStudent && (
-            <button 
-                onClick={() => window.print()}
-                className="fixed bottom-8 right-8 bg-indigo-600 text-white p-4 rounded-full shadow-xl hover:bg-indigo-700 hover:scale-110 active:scale-95 transition-all print:hidden z-50 flex items-center gap-2 group"
-                title="列印當前報告 (Ctrl+P)"
-            >
-                <Printer size={24} />
-                <span className="max-w-0 overflow-hidden group-hover:max-w-xs transition-all duration-300 font-bold whitespace-nowrap">
-                    列印報告
-                </span>
-            </button>
-        )}
+                    {/* Print FAB */}
+                    {currentStudent && (
+                        <button 
+                            onClick={() => window.print()}
+                            className="fixed bottom-8 right-8 bg-indigo-600 text-white p-4 rounded-full shadow-xl hover:bg-indigo-700 hover:scale-110 active:scale-95 transition-all print:hidden z-50 flex items-center gap-2 group"
+                            title="列印當前報告 (Ctrl+P)"
+                        >
+                            <Icon name="Printer" size={24} />
+                            <span className="max-w-0 overflow-hidden group-hover:max-w-xs transition-all duration-300 font-bold whitespace-nowrap">
+                                列印報告
+                            </span>
+                        </button>
+                    )}
+                </div>
+            );
+        };
 
-        <style>{`
-            @media print {
-                @page { margin: 1cm; size: A4; }
-                body { background: white; -webkit-print-color-adjust: exact; }
-                aside, header, button, .no-print { display: none !important; }
-                #report-viewer { overflow: visible !important; height: auto !important; padding: 0 !important; background: white !important; }
-                main > div { box-shadow: none !important; border: none !important; }
-            }
-            .custom-scrollbar::-webkit-scrollbar { width: 6px; }
-            .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-            .custom-scrollbar::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 3px; }
-            .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #cbd5e1; }
-        `}</style>
-    </div>
-  );
-}
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
